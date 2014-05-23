@@ -260,9 +260,7 @@ function createClient(options) {
   }
 
   function onKeepAlive(packet) {
-    client.write(0x00, {
-      keepAliveId: packet.keepAliveId
-    });
+    client.write(0x03, {});
   }
 
   function onEncryptionKeyRequest(packet) {

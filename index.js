@@ -1,7 +1,6 @@
 var EventEmitter = require('events').EventEmitter
         , util = require('util')
         , assert = require('assert')
-        , ursa = require('ursa')
         , crypto = require('crypto')
         , bufferEqual = require('buffer-equal')
         , superagent = require('superagent')
@@ -37,9 +36,6 @@ function createServer(options) {
   var kickTimeout = options.kickTimeout || 10 * 1000;
   var checkTimeoutInterval = options.checkTimeoutInterval || 4 * 1000;
   var onlineMode = options['online-mode'] == null ? true : options['online-mode'];
-  var encryptionEnabled = options.encryption == null ? true : options.encryption;
-
-  var serverKey = ursa.generatePrivateKey(1024);
 
   var server = new Server(options);
   server.motd = options.motd || "A Minecraft server";
@@ -120,28 +116,7 @@ function createServer(options) {
 
     function onLogin(packet) {
       client.username = packet.username;
-      var isException = !!server.onlineModeExceptions[client.username.toLowerCase()];
-      var needToVerify = (onlineMode && ! isException) || (! onlineMode && isException);
-      if (encryptionEnabled || needToVerify) {
-        var serverId = crypto.randomBytes(4).toString('hex');
-        client.verifyToken = crypto.randomBytes(4);
-        var publicKeyStrArr = serverKey.toPublicPem("utf8").split("\n");
-        var publicKeyStr = "";
-        for (var i = 1; i < publicKeyStrArr.length - 2; i++) {
-          publicKeyStr += publicKeyStrArr[i]
-        }
-        client.publicKey = new Buffer(publicKeyStr, 'base64');
-        hash = crypto.createHash("sha1");
-        hash.update(serverId);
-        client.once([states.LOGIN, 0x01], onEncryptionKeyResponse);
-        client.write(0x01, {
-          serverId: serverId,
-          publicKey: client.publicKey,
-          verifyToken: client.verifyToken
-        });
-      } else {
-        loginClient();
-      }
+      loginClient();
     }
 
     function onHandshake(packet) {
@@ -149,37 +124,6 @@ function createServer(options) {
         client.state = states.STATUS;
       } else if (packet.nextState == 2) {
         client.state = states.LOGIN;
-      }
-    }
-
-    function onEncryptionKeyResponse(packet) {
-      var verifyToken = serverKey.decrypt(packet.verifyToken, undefined, undefined, ursa.RSA_PKCS1_PADDING);
-      if (!bufferEqual(client.verifyToken, verifyToken)) {
-        client.end('DidNotEncryptVerifyTokenProperly');
-        return;
-      }
-      var sharedSecret = serverKey.decrypt(packet.sharedSecret, undefined, undefined, ursa.RSA_PKCS1_PADDING);
-      client.cipher = crypto.createCipheriv('aes-128-cfb8', sharedSecret, sharedSecret);
-      client.decipher = crypto.createDecipheriv('aes-128-cfb8', sharedSecret, sharedSecret);
-      hash.update(sharedSecret);
-      hash.update(client.publicKey);
-      client.encryptionEnabled = true;
-
-      var isException = !!server.onlineModeExceptions[client.username.toLowerCase()];
-      var needToVerify = (onlineMode && !isException) || (!onlineMode && isException);
-      var nextStep = needToVerify ? verifyUsername : loginClient;
-      nextStep();
-
-      function verifyUsername() {
-        var digest = mcHexDigest(hash);
-        validateSession(client.username, digest, function(err, uuid) {
-          if (err) {
-            client.end("Failed to verify username!");
-            return;
-          }
-          client.uuid = uuid;
-          loginClient();
-        });
       }
     }
 
@@ -218,9 +162,9 @@ function createClient(options) {
   var client = new Client(false);
   client.on('connect', onConnect);
   if (keepAlive) client.on([states.PLAY, 0x00], onKeepAlive);
-  client.once([states.LOGIN, 0x01], onEncryptionKeyRequest);
   client.once([states.LOGIN, 0x02], onLogin);
-
+  client.once([states.LOGIN, 0x03], onSetCompression);
+  
   if (haveCredentials) {
     // make a request to get the case-correct username before connecting.
     var cb = function(err, session) {
@@ -260,62 +204,12 @@ function createClient(options) {
   }
 
   function onKeepAlive(packet) {
-    client.write(0x00, {
-      keepAliveId: packet.keepAliveId
-    });
+    client.writeRaw(new Buffer([0x03, 0x00, 0x03, 0x01]));
   }
 
-  function onEncryptionKeyRequest(packet) {
-    crypto.randomBytes(16, gotSharedSecret);
-
-    function gotSharedSecret(err, sharedSecret) {
-      if (err) {
-        client.emit('error', err);
-        client.end();
-        return
-      }
-
-      if (haveCredentials) {
-        joinServerRequest(onJoinServerResponse);
-      } else {
-        if (packet.serverId != '-') {
-          debug('This server appears to be an online server and you are providing no password, the authentication will probably fail');
-        }
-        sendEncryptionKeyResponse();
-      }
-
-      function onJoinServerResponse(err) {
-        if (err) {
-          client.emit('error', err);
-          client.end();
-        } else {
-          sendEncryptionKeyResponse();
-        }
-      }
-
-      function joinServerRequest(cb) {
-        var hash = crypto.createHash('sha1');
-        hash.update(packet.serverId);
-        hash.update(sharedSecret);
-        hash.update(packet.publicKey);
-
-        var digest = mcHexDigest(hash);
-        joinServer(this.username, digest, accessToken, client.session.selectedProfile.id, cb);
-      }
-
-      function sendEncryptionKeyResponse() {
-        var pubKey = mcPubKeyToURsa(packet.publicKey);
-        var encryptedSharedSecretBuffer = pubKey.encrypt(sharedSecret, undefined, undefined, ursa.RSA_PKCS1_PADDING);
-        var encryptedVerifyTokenBuffer = pubKey.encrypt(packet.verifyToken, undefined, undefined, ursa.RSA_PKCS1_PADDING);
-        client.cipher = crypto.createCipheriv('aes-128-cfb8', sharedSecret, sharedSecret);
-        client.decipher = crypto.createDecipheriv('aes-128-cfb8', sharedSecret, sharedSecret);
-        client.write(0x01, {
-          sharedSecret: encryptedSharedSecretBuffer,
-          verifyToken: encryptedVerifyTokenBuffer,
-        });
-        client.encryptionEnabled = true;
-      }
-    }
+  function onSetCompression(packet) {
+    client.compression.enabled = true;
+    client.compression.threshold = packet.threshold;
   }
   
   function onLogin(packet) {
@@ -325,19 +219,6 @@ function createClient(options) {
   }
 }
 
-
-
-function mcPubKeyToURsa(mcPubKeyBuffer) {
-  var pem = "-----BEGIN PUBLIC KEY-----\n";
-  var base64PubKey = mcPubKeyBuffer.toString('base64');
-  var maxLineLength = 65;
-  while (base64PubKey.length > 0) {
-    pem += base64PubKey.substring(0, maxLineLength) + "\n";
-    base64PubKey = base64PubKey.substring(maxLineLength);
-  }
-  pem += "-----END PUBLIC KEY-----\n";
-  return ursa.createPublicKey(pem, 'utf8');
-}
 
 function mcHexDigest(hash) {
   var buffer = new Buffer(hash.digest(), 'binary');

@@ -214,10 +214,9 @@ function createClient(options) {
   var haveCredentials = options.password != null || (clientToken != null && accessToken != null);
   var keepAlive = options.keepAlive == null ? true : options.keepAlive;
 
-
   var client = new Client(false);
   client.on('connect', onConnect);
-  if (keepAlive) client.on([states.PLAY, 0x00], onKeepAlive);
+  setInterval(onKeepAlive, 4 * 1000)
   client.once([states.LOGIN, 0x01], onEncryptionKeyRequest);
   client.once([states.LOGIN, 0x02], onLogin);
 
@@ -260,7 +259,7 @@ function createClient(options) {
   }
 
   function onKeepAlive(packet) {
-    client.write(0x03, {});
+    client.writeRaw("\x03\x00\x03\x01", false);
   }
 
   function onEncryptionKeyRequest(packet) {

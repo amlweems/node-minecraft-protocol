@@ -2,8 +2,10 @@ var mc = require('../')
   , states = mc.protocol.states
 
 var client = mc.createClient({
-  username: process.env.MC_USERNAME,
-  password: process.env.MC_PASSWORD,
+    host: "trebuchet.me",
+    port: 25565,
+    username: "tonythepony",
+    keepAlive: true,
 });
 client.on('connect', function() {
   console.info('connected');
